@@ -1,10 +1,12 @@
 # pgz
 
-Driver PostgreSQL zero-alloc para Go. La forma mas rapida de sacar JSON
-de PostgreSQL, y ahora tambien de meter datos.
+Driver PostgreSQL zero-alloc para Go. La forma mas rapida de mover
+filas entre Go y PostgreSQL — SELECT a JSON, scans tipados a struct,
+DML, COPY en ambas direcciones, batches pipelinadas, y un adaptador
+`database/sql` completo.
 
-SELECT, INSERT, UPDATE, DELETE, RETURNING, CALL -- sin ORM, sin
-reflexion, sin dependencias.
+Sin ORM. Sin reflexion en el hot path. Sin dependencias runtime fuera
+de la stdlib.
 
 Disponible en [English](README.md) | [Español](README.es.md).
 
@@ -16,8 +18,7 @@ Disponible en [English](README.md) | [Español](README.es.md).
 go get github.com/arturoeanton/pgz
 ```
 
-Requiere Go 1.21+. Sin cgo. Cero dependencias runtime fuera de la
-stdlib.
+Requiere Go 1.21+. Sin cgo.
 
 ---
 
@@ -35,7 +36,7 @@ if err != nil { log.Fatal(err) }
 defer c.Close()
 ```
 
-### Lectura -- SELECT a JSON
+### Lectura — SELECT a JSON
 
 ```go
 // JSON array bufferizado
@@ -58,7 +59,7 @@ type User struct {
 users, _ := pgz.ScanStruct[User](c, ctx,
     "SELECT id, name, email, tags, meta FROM users")
 
-// Scan por batch -- O(batchSize) en memoria para 100M filas
+// Scan por batch — O(batchSize) en memoria para 100M filas
 pgz.ScanStructBatched[User](c, ctx, 10_000,
     func(batch []User) error {
         return processBatch(batch)
@@ -66,7 +67,7 @@ pgz.ScanStructBatched[User](c, ctx, 10_000,
     "SELECT id, name, email, tags, meta FROM user_log")
 ```
 
-### Escritura -- DML
+### Escritura — DML
 
 ```go
 // INSERT / UPDATE / DELETE
@@ -74,7 +75,7 @@ res, _ := c.Exec(ctx,
     "INSERT INTO users (name, email) VALUES ($1, $2)", "alice", "alice@example.com")
 fmt.Println(res.RowsAffected) // 1
 
-// DML con RETURNING -- streamea el resultado como NDJSON
+// DML con RETURNING — streamea el resultado como NDJSON
 c.ExecReturning(ctx, w,
     "INSERT INTO users (name) VALUES ($1), ($2) RETURNING id, name",
     "bob", "charlie")
@@ -87,7 +88,75 @@ buf, _ := c.ExecReturningJSON(ctx,
 c.Exec(ctx, "CALL refresh_materialized_views()")
 ```
 
-### Adapter `database/sql`
+### Datos en masa — COPY
+
+```go
+// Import desde cualquier io.Reader (CSV, TEXT)
+c.CopyFrom(ctx, "COPY users (id, name) FROM STDIN (FORMAT csv)",
+    strings.NewReader(csvBody))
+
+// Import binario — campo a campo tipado, mas rapido que pgx.CopyFrom
+rows := []row{...}
+var i int
+c.CopyFromBinary(ctx,
+    "COPY users (id, name, score) FROM STDIN (FORMAT binary)", 3,
+    func(w *pgz.CopyWriter) error {
+        if i >= len(rows) { return io.EOF }
+        w.Int4(rows[i].id); w.Text(rows[i].name); w.Float8(rows[i].score)
+        i++
+        return nil
+    })
+
+// Export texto — cero allocs por fila, pumpea bytes a cualquier io.Writer
+c.CopyTo(ctx, "COPY (SELECT * FROM users) TO STDOUT (FORMAT csv)", w)
+
+// Export binario con CopyReader tipado
+c.CopyToBinary(ctx,
+    "COPY (SELECT id, name FROM users) TO STDOUT (FORMAT binary)", 2,
+    func(r *pgz.CopyReader) error {
+        id, _ := r.Int4()
+        name, _ := r.Text()
+        return r.Err()
+    })
+```
+
+### Batches pipelinadas
+
+```go
+b := pgz.NewBatch()
+b.Queue("UPDATE users SET last_seen = now() WHERE id = $1", 42)
+b.Queue("INSERT INTO audit (user_id, action) VALUES ($1, $2)", 42, "login")
+
+br := c.SendBatch(ctx, b)
+defer br.Close()
+for i := 0; i < b.Len(); i++ {
+    if _, err := br.Exec(); err != nil { return err }
+}
+```
+
+Todos los items en cola van en una sola escritura TCP. La primera
+ocurrencia de cada SQL unico se Parsea + Describe y se cachea; los
+items siguientes (y batches futuros) saltean Parse del todo.
+Medido +16 % throughput y 10.6× menos memoria que `pgx.SendBatch`.
+
+### Errores estructurados
+
+```go
+if _, err := c.Exec(ctx, "INSERT ..."); err != nil {
+    var pgErr *pgz.PGError
+    if errors.As(err, &pgErr) && pgErr.IsUniqueViolation() {
+        return ErrDuplicateUser
+    }
+    return err
+}
+```
+
+Los helpers cubren cada SQLSTATE donde un gateway tipicamente
+ramifica — `IsUniqueViolation`, `IsForeignKeyViolation`,
+`IsSerializationFailure`, `IsDeadlock`, `IsQueryCanceled`,
+`IsAdminShutdown`, `IsInvalidSQLStatementName`, y mas.
+
+### Adaptador `database/sql`
 
 ```go
 import (
@@ -96,11 +165,39 @@ import (
 )
 
 db, _ := sql.Open("pgz", "postgres://user:pass@host/db?sslmode=require")
+
+// Lectura
 rows, _ := db.Query("SELECT id, name FROM users WHERE active = $1", true)
+
+// Escritura
+db.Exec("INSERT INTO users (name, email) VALUES ($1, $2)", "alice", "alice@...")
+
+// Transaccion
+tx, _ := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+tx.Exec("UPDATE ...")
+tx.Commit()
+
+// INSERT ... RETURNING
+var id int
+db.QueryRow("INSERT INTO users (name) VALUES ($1) RETURNING id", "bob").Scan(&id)
 ```
 
-El adapter es read-only para SELECTs: `db.Exec` y `db.Begin` devuelven
-error. Usa `Exec`/`ExecReturning` en la API nativa para escrituras.
+El adaptador esta completo: lectura, escritura, transacciones,
+prepared statements, RETURNING via QueryRow. Compatible con `sqlc`,
+`goose`, `golang-migrate`, `sqlx`.
+
+### OpenTelemetry
+
+```go
+import pgzotel "github.com/arturoeanton/pgz/pgz/otel"
+
+obs, _ := pgzotel.New(tracerProvider, meterProvider)
+c.SetObserver(obs)
+```
+
+Un span por query, cuatro metricas (`pgz.query.duration`,
+`pgz.query.rows`, `pgz.query.errors`, `pgz.query.slow`). Las
+dependencias de OTel solo se cargan cuando importas el subpackage.
 
 ---
 
@@ -129,8 +226,8 @@ Texto es el fallback correcto.
 |---|---|---|---|
 | bool | binary | `true`/`false` | `bool` |
 | int2, int4, int8, oid | binary | numero | `int16/32/64`, `uint32` |
-| float4, float8 | binary | numero (NaN -> `"NaN"`) | `float32/64` |
-| numeric | text | numero | `string`, `sql.Scanner` |
+| float4, float8 | binary | numero (NaN → `"NaN"`) | `float32/64` |
+| numeric | text (binario opt-in) | numero | `string`, `sql.Scanner` |
 | text, varchar, bpchar | text | string escapado | `string`, `[]byte` |
 | uuid | binary | `"xxxxxxxx-..."` | `string`, `[16]byte` |
 | json, jsonb | binary | JSON embebido | `json.RawMessage` |
@@ -142,41 +239,54 @@ Texto es el fallback correcto.
 | composite types | binary | objeto anidado | struct (declarar OID) |
 | cualquier otro | text | string escapado | `string` |
 
+Los parametros se envian en binario para int / float / bool / bytea
+/ timestamp; texto para strings y lo demas.
+
 ---
 
 ## Performance
 
-### pgz vs pgx -- streaming JSON, 100k filas
+Apple M4 Max, macOS, PostgreSQL 17.9 en Docker loopback.
 
-Medido en dos plataformas. Bench completo en `tests/pgx_compare_test.go`.
+### vs pgx — streaming JSON, 100 000 filas
 
-**Intel Core Ultra 7 155U, Linux, PostgreSQL 17:**
+| Shape | pgz `StreamNDJSON` | pgx Map | pgx Raw (hand-tuned) |
+|---|---|---|---|
+| narrow_int | **129.6 MB/s**, 6 allocs | 40.1 MB/s, 1.0M allocs | 128.3 MB/s, 6 allocs |
+| mixed_5col | **168.4 MB/s**, 6 allocs | 70.5 MB/s, 3.3M allocs | 168.9 MB/s, 11 allocs |
+| wide_jsonb | **143.2 MB/s**, 6 allocs | 32.4 MB/s, 3.4M allocs | 143.5 MB/s, 8 allocs |
+| null_heavy | **174.0 MB/s**, 6 allocs | 59.1 MB/s, 1.3M allocs | 179.4 MB/s, 8 allocs |
 
-| Forma | pgz | pgx Map | pgx Raw | vs Map |
-|---|---|---|---|---|
-| mixed_5col | 97 MB/s, 6 allocs | 16 MB/s, 3.3M allocs | 49 MB/s | **6x mas rapido** |
-| wide_jsonb | 75 MB/s, 6 allocs | 7 MB/s, 3.4M allocs | 72 MB/s | **10x mas rapido** |
-| array_int | 104 MB/s, 6 allocs | 14 MB/s, 4.5M allocs | 90 MB/s | **7.7x mas rapido** |
-| null_heavy | 67 MB/s, 6 allocs | 14 MB/s, 1.3M allocs | 87 MB/s | **4.8x mas rapido** |
+pgz iguala o gana a los encoders `RawValues` hand-tuned con una API
+nativa que requiere cero codigo custom. Los caminos naive (los que
+realmente escribe el codigo de produccion) quedan 2–4× atras.
 
-### pgz vs pgx -- struct scan, 100k filas
+### vs pgx — COPY y Pipeline
 
-| Path | rows/s | allocs |
+| Camino | pgz | pgx |
 |---|---|---|
-| pgz ScanStruct | **2.1M** | 200k |
-| pgx Scan | 1.2M | 600k |
-| pgx CollectByName | 559k | 700k |
+| COPY FROM binario (100k filas) | **190.1 MB/s**, 100k allocs | 132.2 MB/s, 500k allocs |
+| COPY TO texto (100k filas) | 166.1 MB/s, **1 alloc** | 169.0 MB/s, 3 allocs |
+| SendBatch (100 INSERTs) | **280 553 filas/s**, 102 allocs | 242 241 filas/s, 814 allocs |
 
-La ventaja es arquitectural: pgz decodifica bytes del wire directo a
-JSON o campos de struct sin tipos Go intermedios, maps, ni round-trips
-por `json.Marshal`. Esto se mantiene en todas las plataformas.
+### vs pgx — camino `database/sql` de escritura (1000 INSERTs)
 
-Corré los benchmarks:
+| Patron | pgz | pgx/stdlib | lib/pq |
+|---|---|---|---|
+| InsertExec | **8 451 filas/s** | 8 146 filas/s | 4 108 filas/s |
+| InsertPrepared | **8 714 filas/s** | 8 170 filas/s | 8 405 filas/s |
+| Tx en lote | **8 676 filas/s** | 8 289 filas/s | 4 233 filas/s |
+
+Ver [BENCHMARKS.md](BENCHMARKS.md) para la matriz completa — 24
+escenarios, conteo de podios, veredicto por feature, y los tres
+lugares donde pgz no gana.
+
+Corre los numeros vos:
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d
 export PGZ_TEST_DSN="postgres://pgopt:pgopt@127.0.0.1:55432/pgopt?sslmode=disable"
-go test ./tests -run '^$' -bench BenchmarkPgx -benchmem -benchtime=3s
+go test ./tests -run '^$' -bench . -benchmem -benchtime=2s
 ```
 
 ---
@@ -204,13 +314,14 @@ p, _ := pool.New(pool.Config{
 defer p.Close()
 ```
 
-- **Topes duros por respuesta** -- `CancelRequest` + `*ResponseTooLargeError`
-- **PgBouncer-txn safe** -- re-prepare transparente en SQLSTATE 26000
-- **Retry en serializacion** -- opt-in en 40001/40P01 (rebalance Citus)
+- **Topes duros por respuesta** — `CancelRequest` + `*ResponseTooLargeError`
+- **PgBouncer-txn safe** — re-prepare transparente en SQLSTATE 26000
+- **Retry en serializacion** — opt-in en 40001/40P01 (rebalance Citus)
 - **CancelRequest real** en `ctx.Cancel`
-- **Header diferido** -- cero bytes downstream si falla antes de una fila
-- **Shutdown graceful** -- `Pool.Drain(ctx)`, `Pool.WaitIdle(ctx)`
-- **Observer** -- `OnQueryStart/End/Slow/Notice` + `Stats()` atomicos
+- **Header diferido** — cero bytes downstream si falla antes de una fila
+- **Shutdown graceful** — `Pool.Drain(ctx)`, `Pool.WaitIdle(ctx)`
+- **Observer** — `OnQueryStart/End/Slow/Notice` + `Stats()` atomicos
+- **OpenTelemetry** — subpackage `pgz/otel` para spans + metricas
 - **TCP keepalive**, perillas de socket buffers, bufio configurable
 
 ---
@@ -257,6 +368,21 @@ pgz.ScanStructBatched[User](c, ctx, 5_000,
     "SELECT id, name, email, created_at FROM users")
 ```
 
+### Escrituras OLTP en batch
+
+```go
+b := pgz.NewBatch()
+for _, evt := range events {
+    b.Queue("INSERT INTO events (user_id, kind, payload) VALUES ($1, $2, $3)",
+        evt.UserID, evt.Kind, evt.Payload)
+}
+br := c.SendBatch(ctx, b)
+defer br.Close()
+for range events {
+    if _, err := br.Exec(); err != nil { return err }
+}
+```
+
 ---
 
 ## Layout
@@ -269,14 +395,18 @@ pgz/
 │   ├── query.go             # paths SELECT (Query/Stream)
 │   ├── exec.go              # paths DML (Exec/ExecReturning)
 │   ├── scan.go              # ScanStruct[T], ScanStructBatched[T]
-│   ├── iter.go              # RawQuery / Iterator
+│   ├── copy.go              # CopyFrom (text + binary)
+│   ├── copy_to.go           # CopyTo (text + binary)
+│   ├── pipeline.go          # Batch / SendBatch
+│   ├── iter.go              # RawQuery / RawQueryAny / Iterator
 │   ├── stream.go            # abstraccion outWriter
 │   ├── stmtcache.go         # cache de prepared statements
 │   ├── observer.go          # hook de telemetria + contadores atomicos
-│   ├── ctx.go               # ctx -> CancelRequest watcher
-│   ├── args.go              # valor Go -> wire text-format
+│   ├── errors.go            # PGError + helpers
+│   ├── args.go              # valor Go -> wire binary / text
 │   ├── pool/                # pool de conexiones
-│   └── stdlib/              # adapter database/sql
+│   ├── stdlib/              # adapter database/sql (lectura + escritura)
+│   └── otel/                # observer OpenTelemetry
 ├── internal/
 │   ├── wire/                # reader/writer framed sobre net.Conn
 │   ├── protocol/            # codigos de mensaje + OIDs
@@ -293,14 +423,15 @@ pgz/
 └── tests/                   # integracion, comparacion, benchmarks
 ```
 
-Ver [ARCHITECTURE.md](ARCHITECTURE.md) para el rationale de diseno.
+Ver [ARCHITECTURE.md](ARCHITECTURE.md) para el rationale de diseno
+y [BENCHMARKS.md](BENCHMARKS.md) para la matriz cara a cara.
 
 ---
 
 ## Build tags
 
-- `pgz_simd` -- escape SWAR de strings JSON. Go puro, sin assembly.
-  ~4x mas rapido en strings ASCII medianas/largas.
+- `pgz_simd` — escape SWAR de strings JSON. Go puro, sin assembly.
+  ~4× mas rapido en strings ASCII medianas/largas.
 
 ```bash
 go build -tags pgz_simd ./...
