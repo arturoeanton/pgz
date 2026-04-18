@@ -1,5 +1,10 @@
 # Roadmap
 
+## Released
+
+- **v0.1.0** (2026-04-18). First tagged release. See
+  [CHANGELOG.md](CHANGELOG.md).
+
 ## Shipped
 
 ### Wire + protocol
@@ -167,7 +172,6 @@
   benchmarks as regression gate.
 - **Shadow-traffic soak test** (8h / 500k-user). Design targets it;
   real-world validation pending.
-- **v0.1.0 tag** + CHANGELOG.md.
 
 ## Later
 

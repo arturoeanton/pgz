@@ -1,5 +1,10 @@
 # Roadmap
 
+## Releases
+
+- **v0.1.0** (2026-04-18). Primer tag publicado. Ver
+  [CHANGELOG.md](CHANGELOG.md).
+
 ## Implementado
 
 ### Wire + protocolo
@@ -176,7 +181,6 @@
   benchmarks del hot path como gate de regresion.
 - **Soak test con trafico shadow** (8h / 500k usuarios). El diseno
   lo soporta; falta validacion real.
-- **Tag v0.1.0** + CHANGELOG.md.
 
 ## Despues
 

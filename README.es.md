@@ -5,8 +5,8 @@ filas entre Go y PostgreSQL — SELECT a JSON, scans tipados a struct,
 DML, COPY en ambas direcciones, batches pipelinadas, y un adaptador
 `database/sql` completo.
 
-Sin ORM. Sin reflexion en el hot path. Sin dependencias runtime fuera
-de la stdlib.
+Sin ORM. Sin reflexion en el hot path. El paquete core usa solamente
+la biblioteca estandar.
 
 Disponible en [English](README.md) | [Español](README.es.md).
 
@@ -18,7 +18,21 @@ Disponible en [English](README.md) | [Español](README.es.md).
 go get github.com/arturoeanton/pgz
 ```
 
-Requiere Go 1.21+. Sin cgo.
+Requiere Go 1.25+. Sin cgo.
+
+### Dependencias
+
+- Paquete core (`github.com/arturoeanton/pgz/pgz`): solo biblioteca
+  estandar.
+- Subpaquete opcional `pgz/otel`: incorpora `go.opentelemetry.io/otel`
+  cuando lo importas. El core no incluye codigo de OTel si no se
+  referencia el subpaquete.
+- `pgx/v5` y `lib/pq` figuran en `go.mod` porque los benchmarks de
+  comparacion en `tests/` los importan como baseline. No los importa
+  ni el core, ni `pgz/stdlib`, ni `pgz/otel`.
+
+Con `go mod why github.com/jackc/pgx/v5` se confirma: los unicos
+caminos llevan a `tests/`.
 
 ---
 
