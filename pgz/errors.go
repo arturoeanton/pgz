@@ -3,7 +3,23 @@ package pgz
 import (
 	"errors"
 	"fmt"
+
+	"github.com/arturoeanton/pgz/internal/pgerr"
 )
+
+// PGError is the structured error returned by the server as an
+// ErrorResponse. Use errors.As to extract it from the error returned by
+// any pgz call:
+//
+//	var pgErr *pgz.PGError
+//	if errors.As(err, &pgErr) && pgErr.IsUniqueViolation() { ... }
+//
+// The Fields map holds every raw field the server sent, keyed by the
+// single-byte field code from the wire format ('C'=Code, 'M'=Message,
+// 'D'=Detail, 'H'=Hint, 'P'=Position, 's'=Schema, 't'=Table,
+// 'n'=Constraint, etc.). The convenience accessors (SQLState, helper
+// predicates) cover the common cases without touching Fields.
+type PGError = pgerr.Error
 
 // ErrResponseTooLarge is the sentinel returned (wrapped in
 // *ResponseTooLargeError) when MaxResponseBytes or MaxResponseRows is hit.
