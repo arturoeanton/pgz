@@ -42,10 +42,22 @@ type Iterator struct {
 // The returned DataRow bodies alias the internal wire buffer and are
 // valid only until the next NextRaw() call, matching the contract of
 // internal/wire.Conn.ReadMessage.
+//
+// RawQuery rejects non-SELECT statements. Use RawQueryAny when DML
+// with RETURNING must be iterated — INSERT/UPDATE/DELETE … RETURNING
+// ships DataRows exactly like SELECT. The database/sql adapter uses
+// RawQueryAny so sql.DB.QueryRow("INSERT ... RETURNING id") works.
 func (c *Client) RawQuery(ctx context.Context, sql string, args ...any) (*Iterator, error) {
 	if err := rejectNonSelect(sql); err != nil {
 		return nil, err
 	}
+	return c.RawQueryAny(ctx, sql, args...)
+}
+
+// RawQueryAny is RawQuery without the SELECT-only guard. Accepts any
+// statement shape that produces rows — typically SELECT or DML with
+// RETURNING. Prefer RawQuery for the SELECT-only contract.
+func (c *Client) RawQueryAny(ctx context.Context, sql string, args ...any) (*Iterator, error) {
 	// Apply DefaultQueryTimeout. The cancel is stashed on the Iterator
 	// and invoked from Close(), not from a defer in this function —
 	// the query is still in flight when we return.

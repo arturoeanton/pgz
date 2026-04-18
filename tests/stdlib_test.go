@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -146,31 +145,10 @@ func TestStdlibPrepare(t *testing.T) {
 	}
 }
 
-func TestStdlibExecRejected(t *testing.T) {
-	db := openStdlibDB(t)
-	defer db.Close()
-
-	_, err := db.Exec("CREATE TABLE should_not_happen (id int)")
-	if err == nil {
-		t.Fatal("expected error on Exec")
-	}
-	if !strings.Contains(err.Error(), "read-only") {
-		t.Fatalf("expected 'read-only' in error, got %v", err)
-	}
-}
-
-func TestStdlibBeginRejected(t *testing.T) {
-	db := openStdlibDB(t)
-	defer db.Close()
-
-	_, err := db.Begin()
-	if err == nil {
-		t.Fatal("expected error on Begin")
-	}
-	if !strings.Contains(err.Error(), "read-only") {
-		t.Fatalf("expected 'read-only' in error, got %v", err)
-	}
-}
+// The driver now supports writes. The former read-only rejection
+// tests migrated to stdlib_write_test.go (TestStdlibExecInsertUpdateDelete,
+// TestStdlibTxCommitRollback). The "strings" import is no longer
+// needed in this file after the rejection tests were removed.
 
 func TestStdlibReuseConn(t *testing.T) {
 	db := openStdlibDB(t)

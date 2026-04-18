@@ -7,20 +7,23 @@
 //	)
 //
 //	db, err := sql.Open("pgz", "postgres://user:pass@host/db?sslmode=disable")
-//	rows, err := db.Query("SELECT id, name FROM users")
+//	rows, err := db.Query("SELECT id, name FROM users WHERE active = $1", true)
+//	_, err = db.Exec("INSERT INTO users (name) VALUES ($1)", "alice")
 //
-// Scope:
-//   - Read-only. Exec / ExecContext / Begin / BeginTx return an error.
-//     Writes must go through pgx (e.g. github.com/jackc/pgx/v5/stdlib)
-//     in a separate *sql.DB pool pointing at the same Postgres.
-//   - Query / QueryContext / QueryRow / Prepare / Ping all work.
+// Both read and write paths are supported. Transactions go through
+// BeginTx / Commit / Rollback. Positional parameters ($1..$N) only —
+// named parameters return an error.
 //
-// Performance note: going through database/sql adds interface boxing
-// (driver.Value per cell, sql.Rows.Scan conversion). The native API
-// (pgz.ScanStruct, pgz.StreamNDJSON, etc.) is 10-30 % faster
-// and has 2-3x fewer allocs. Pick this adapter for drop-in compat
-// with existing code (sqlc, goose, etc.); pick the native API when
-// a read-path hot spot shows up in profiles.
+// The adapter shares the same prepared-statement cache and the same
+// wire connection as the native API, so sql.DB using this driver pays
+// the standard database/sql interface-boxing cost on top of that, but
+// no second pool, no duplicated handshake, no duplicated stmt cache.
+//
+// The native API (pgz.ScanStruct, pgz.StreamNDJSON, pgz.Exec,
+// pgz.CopyFromBinary) remains the fastest path when you own the code
+// end-to-end. Use this adapter when you need sqlc / goose / sqlx /
+// golang-migrate compatibility or when an existing codebase already
+// builds on database/sql.
 package stdlib
 
 import (
@@ -92,14 +95,15 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 
 func (c *connector) Driver() driver.Driver { return Driver{} }
 
-// errReadOnly is returned for any write-path method.
-var errReadOnly = errors.New("pgz: driver is read-only (SELECT only); use pgx for writes — two sql.DB pools to the same Postgres coexist cleanly")
-
 // Conn implements driver.Conn / ConnPrepareContext / ConnBeginTx /
-// ExecerContext / QueryerContext / Pinger / Validator.
+// ExecerContext / QueryerContext / Pinger / Validator. The inTx flag
+// short-circuits BeginTx when a transaction is already open — the
+// database/sql layer would catch it too, but surfacing it here keeps
+// the error message specific.
 type Conn struct {
 	client *pgz.Client
 	bad    bool
+	inTx   bool
 }
 
 func (c *Conn) Prepare(query string) (driver.Stmt, error) {
@@ -119,33 +123,85 @@ func (c *Conn) Close() error {
 	return err
 }
 
-// Begin implements driver.Conn but always returns errReadOnly.
-// database/sql calls this for legacy BeginTx-less code paths.
-func (c *Conn) Begin() (driver.Tx, error) { return nil, errReadOnly }
+// Begin implements driver.Conn by delegating to BeginTx with default
+// options. database/sql calls this for legacy BeginTx-less code paths.
+func (c *Conn) Begin() (driver.Tx, error) {
+	return c.BeginTx(context.Background(), driver.TxOptions{})
+}
 
-// BeginTx implements driver.ConnBeginTx. We reject any transaction
-// attempt — pgz is read-only and transactions imply a write-path
-// contract users will expect us to honour.
+// BeginTx opens a transaction. The isolation level and read-only flag
+// are translated to their SQL equivalents and issued as part of the
+// opening statement. Nesting is rejected; database/sql normally
+// prevents it but we surface a specific error.
 func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
-	return nil, errReadOnly
+	if c.bad || c.client == nil {
+		return nil, driver.ErrBadConn
+	}
+	if c.inTx {
+		return nil, errors.New("pgz/stdlib: nested transaction not supported")
+	}
+	stmt := buildBeginStmt(opts)
+	if _, err := c.client.Exec(ctx, stmt); err != nil {
+		c.markBad(err)
+		return nil, err
+	}
+	c.inTx = true
+	return &pgzTx{c: c}, nil
 }
 
-// ExecContext always returns errReadOnly. Provided so database/sql
-// routes writes to this error rather than falling back to the
-// Prepare+Exec dance and failing opaquely.
+// ExecContext runs a DML / DDL statement. On PG protocol-level errors
+// (ErrorResponse) we return a *pgz.PGError untouched so callers can
+// errors.As it; on wire-level errors we mark the conn bad and return
+// driver.ErrBadConn so database/sql evicts it from the pool.
 func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	return nil, errReadOnly
-}
-
-// QueryContext is the fast path for database/sql.Query without a
-// separate Prepare step. args are converted via namedToAny.
-func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if c.bad || c.client == nil {
+		return nil, driver.ErrBadConn
+	}
 	anyArgs, err := namedToAny(args)
 	if err != nil {
 		return nil, err
 	}
-	it, err := c.client.RawQuery(ctx, query, anyArgs...)
+	res, err := c.client.Exec(ctx, query, anyArgs...)
 	if err != nil {
+		c.markBad(err)
+		return nil, err
+	}
+	return execResult{rows: res.RowsAffected}, nil
+}
+
+// markBad flags the conn as unreusable when err is a wire-level
+// failure. PG-protocol errors (ErrorResponse wrapped in *pgz.PGError)
+// leave the connection in a recoverable state — PG already sent
+// ReadyForQuery — so we do NOT mark bad for those. Everything else
+// (net.OpError, broken pipe, short read) means the conn is dead.
+func (c *Conn) markBad(err error) {
+	var pgErr *pgz.PGError
+	if errors.As(err, &pgErr) {
+		return
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		// ctx cancellation does not mean the socket is corrupt; the
+		// pgz CancelRequest path leaves the conn reusable.
+		return
+	}
+	c.bad = true
+}
+
+// QueryContext is the fast path for database/sql.Query without a
+// separate Prepare step. args are converted via namedToAny. Uses
+// RawQueryAny so INSERT/UPDATE/DELETE … RETURNING work through
+// db.QueryRow exactly like SELECT.
+func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if c.bad || c.client == nil {
+		return nil, driver.ErrBadConn
+	}
+	anyArgs, err := namedToAny(args)
+	if err != nil {
+		return nil, err
+	}
+	it, err := c.client.RawQueryAny(ctx, query, anyArgs...)
+	if err != nil {
+		c.markBad(err)
 		return nil, err
 	}
 	return newRows(it)
@@ -174,11 +230,26 @@ func (s *Stmt) Close() error { return nil } // nothing to release; real caching 
 func (s *Stmt) NumInput() int { return s.numInput }
 
 func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
-	return nil, errReadOnly
+	return s.ExecContext(context.Background(), valuesToNamed(args))
 }
 
+// ExecContext reuses the shared native stmt cache by SQL key. The
+// second call with the same query skips Parse + Describe and goes
+// straight to Bind + Execute + Sync.
 func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
-	return nil, errReadOnly
+	if s.c.bad || s.c.client == nil {
+		return nil, driver.ErrBadConn
+	}
+	anyArgs, err := namedToAny(args)
+	if err != nil {
+		return nil, err
+	}
+	res, err := s.c.client.Exec(ctx, s.query, anyArgs...)
+	if err != nil {
+		s.c.markBad(err)
+		return nil, err
+	}
+	return execResult{rows: res.RowsAffected}, nil
 }
 
 func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
@@ -186,12 +257,16 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 }
 
 func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
+	if s.c.bad || s.c.client == nil {
+		return nil, driver.ErrBadConn
+	}
 	anyArgs, err := namedToAny(args)
 	if err != nil {
 		return nil, err
 	}
-	it, err := s.c.client.RawQuery(ctx, s.query, anyArgs...)
+	it, err := s.c.client.RawQueryAny(ctx, s.query, anyArgs...)
 	if err != nil {
+		s.c.markBad(err)
 		return nil, err
 	}
 	return newRows(it)
@@ -379,6 +454,78 @@ func (r *pgRows) Next(dest []driver.Value) error {
 		dest[i] = r.decoders[i](raw)
 	}
 	return nil
+}
+
+// --- Result / Tx --------------------------------------------------------
+
+// execResult is the driver.Result returned from any non-Query Exec.
+// LastInsertId is unsupported on PostgreSQL — the canonical pattern
+// is RETURNING id via db.QueryRow. We surface that in the error
+// message rather than lie about a zero value.
+type execResult struct {
+	rows int64
+}
+
+func (r execResult) LastInsertId() (int64, error) {
+	return 0, errors.New("pgz/stdlib: LastInsertId not supported — use INSERT ... RETURNING id with QueryRow")
+}
+
+func (r execResult) RowsAffected() (int64, error) { return r.rows, nil }
+
+// pgzTx is the driver.Tx implementation. Commit/Rollback release the
+// inTx flag and clear the conn so database/sql returns it to the pool.
+type pgzTx struct {
+	c *Conn
+}
+
+func (t *pgzTx) Commit() error   { return t.finish("COMMIT") }
+func (t *pgzTx) Rollback() error { return t.finish("ROLLBACK") }
+
+func (t *pgzTx) finish(stmt string) error {
+	if t.c == nil {
+		return errors.New("pgz/stdlib: tx already finished")
+	}
+	c := t.c
+	t.c = nil
+	if !c.inTx {
+		return nil
+	}
+	c.inTx = false
+	if c.bad || c.client == nil {
+		return driver.ErrBadConn
+	}
+	_, err := c.client.Exec(context.Background(), stmt)
+	if err != nil {
+		c.markBad(err)
+	}
+	return err
+}
+
+// buildBeginStmt emits a single BEGIN … statement that carries the
+// requested isolation level and read-only flag. Doing it in one
+// statement (vs BEGIN; SET TRANSACTION …) saves a round-trip.
+func buildBeginStmt(opts driver.TxOptions) string {
+	base := "BEGIN"
+	switch sql.IsolationLevel(opts.Isolation) {
+	case sql.LevelDefault:
+		// no-op
+	case sql.LevelReadUncommitted:
+		base += " ISOLATION LEVEL READ UNCOMMITTED"
+	case sql.LevelReadCommitted:
+		base += " ISOLATION LEVEL READ COMMITTED"
+	case sql.LevelRepeatableRead:
+		base += " ISOLATION LEVEL REPEATABLE READ"
+	case sql.LevelSerializable:
+		base += " ISOLATION LEVEL SERIALIZABLE"
+	}
+	if opts.ReadOnly {
+		if base == "BEGIN" {
+			base += " READ ONLY"
+		} else {
+			base += " READ ONLY"
+		}
+	}
+	return base
 }
 
 // --- helpers ------------------------------------------------------------
