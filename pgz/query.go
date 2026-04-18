@@ -349,7 +349,7 @@ func (c *Client) prepareAndDescribe(sql string) (*preparedStmt, error) {
 			if plan == nil {
 				return nil, fmt.Errorf("pgz: prepare returned no row description")
 			}
-			fmts := rows.PickResultFormats(plan.Columns)
+			fmts := rows.PickResultFormatsEx(plan.Columns, c.cfg.BinaryNumeric)
 			// Upgrade columns whose OID matches Config.BinaryOIDs —
 			// primarily user-defined composite types the caller
 			// declared ahead of time.
@@ -363,7 +363,7 @@ func (c *Client) prepareAndDescribe(sql string) (*preparedStmt, error) {
 					}
 				}
 			}
-			plan.ApplyFormats(fmts)
+			plan.ApplyFormatsEx(fmts, c.cfg.BinaryNumeric)
 			return &preparedStmt{name: name, plan: plan, resultFmts: fmts}, nil
 		default:
 			return nil, fmt.Errorf("pgz: unexpected msg %q during describe", t)

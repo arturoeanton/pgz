@@ -36,10 +36,18 @@ type Plan struct {
 	TOONHeader []byte
 }
 
-// ApplyFormats rewrites the encoder for each column to match the supplied
-// per-column format codes. Used after Bind asks the server for binary on
-// some columns.
+// ApplyFormats rewrites the encoder for each column to match the
+// supplied per-column format codes. Used after Bind asks the server
+// for binary on some columns. Equivalent to ApplyFormatsEx(formats,
+// false).
 func (p *Plan) ApplyFormats(formats []int16) {
+	p.ApplyFormatsEx(formats, false)
+}
+
+// ApplyFormatsEx is ApplyFormats with the BinaryNumeric toggle. When
+// binaryNumeric is true, NUMERIC columns whose format is 1 pick up the
+// binary decoder from numeric_bin.go.
+func (p *Plan) ApplyFormatsEx(formats []int16, binaryNumeric bool) {
 	for i := range p.Columns {
 		var f int16
 		if len(formats) == 1 {
@@ -49,7 +57,7 @@ func (p *Plan) ApplyFormats(formats []int16) {
 		}
 		p.Columns[i].Format = f
 		if f == 1 {
-			if be := types.PickBinary(p.Columns[i].TypeOID); be != nil {
+			if be := types.PickBinaryEx(p.Columns[i].TypeOID, binaryNumeric); be != nil {
 				p.Columns[i].Encoder = be
 			} else {
 				// Binary requested but we have no specialised
@@ -76,13 +84,21 @@ func ParseRowDescriptionForFormats(body []byte, formats []int16) (*Plan, error) 
 	return p, nil
 }
 
-// PickResultFormats returns one int16 per column describing the format we
-// want the server to send (1=binary, 0=text), based on which OIDs have
-// specialised binary encoders.
+// PickResultFormats returns one int16 per column describing the format
+// we want the server to send (1=binary, 0=text), based on which OIDs
+// have specialised binary encoders. Equivalent to
+// PickResultFormatsEx(cols, false).
 func PickResultFormats(cols []Column) []int16 {
+	return PickResultFormatsEx(cols, false)
+}
+
+// PickResultFormatsEx is PickResultFormats with the BinaryNumeric
+// toggle. When binaryNumeric is true, NUMERIC columns are requested in
+// binary format.
+func PickResultFormatsEx(cols []Column, binaryNumeric bool) []int16 {
 	out := make([]int16, len(cols))
 	for i, c := range cols {
-		if types.HasBinary(c.TypeOID) {
+		if types.HasBinaryEx(c.TypeOID, binaryNumeric) {
 			out[i] = 1
 		}
 	}

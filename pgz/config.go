@@ -141,6 +141,19 @@ type Config struct {
 	// streaming mode caps growth at ~2× FlushBytes because anything
 	// above the flush threshold just delays the flush. 0 = disabled.
 	RowsHint int
+
+	// BinaryNumeric asks the server for PostgreSQL NUMERIC columns in
+	// binary wire format. Default false — text is faster on loopback
+	// and common precisions because the server's C formatter beats the
+	// Go binary decoder in the common case. Enable when one of:
+	//
+	//   - The link has non-trivial RTT (≥ 5 ms) and cells are wide.
+	//   - Precision is high (numeric(30,10)+); binary halves the bytes.
+	//   - A profile shows text-numeric parsing dominating CPU.
+	//
+	// Correctness is identical in both modes. NaN / ±Infinity are
+	// rendered as JSON strings in either case.
+	BinaryNumeric bool
 }
 
 func (c *Config) applyDefaults() {

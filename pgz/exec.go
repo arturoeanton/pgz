@@ -163,7 +163,7 @@ func (c *Client) execPrepare(sql string) (*preparedStmt, error) {
 			if plan == nil {
 				return nil, fmt.Errorf("pgz: exec prepare returned neither NoData nor RowDescription")
 			}
-			fmts := rows.PickResultFormats(plan.Columns)
+			fmts := rows.PickResultFormatsEx(plan.Columns, c.cfg.BinaryNumeric)
 			if len(c.cfg.BinaryOIDs) > 0 {
 				for i, col := range plan.Columns {
 					for _, oid := range c.cfg.BinaryOIDs {
@@ -174,7 +174,7 @@ func (c *Client) execPrepare(sql string) (*preparedStmt, error) {
 					}
 				}
 			}
-			plan.ApplyFormats(fmts)
+			plan.ApplyFormatsEx(fmts, c.cfg.BinaryNumeric)
 			return &preparedStmt{name: name, plan: plan, resultFmts: fmts}, nil
 		default:
 			return nil, fmt.Errorf("pgz: unexpected msg %q during exec prepare", t)

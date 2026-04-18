@@ -9,10 +9,26 @@ import (
 	"github.com/arturoeanton/pgz/internal/protocol"
 )
 
-// PickBinary returns a binary-format encoder for the given OID, or nil if
-// we have no specialised binary path for it (callers should fall back to
-// requesting text format for that column).
-func PickBinary(oid protocol.OID) Encoder {
+// PickBinary returns a binary-format encoder for the given OID, or nil
+// if we have no specialised binary path for it (callers should fall
+// back to requesting text format for that column). NUMERIC is
+// excluded here — see PickBinaryEx.
+func PickBinary(oid protocol.OID) Encoder { return PickBinaryEx(oid, false) }
+
+// HasBinary reports whether PickBinary returns a non-nil specialised
+// encoder for oid (i.e. asking for binary is worth it).
+func HasBinary(oid protocol.OID) bool { return PickBinary(oid) != nil }
+
+// HasBinaryEx is HasBinary with the BinaryNumeric toggle.
+func HasBinaryEx(oid protocol.OID, binaryNumeric bool) bool {
+	return PickBinaryEx(oid, binaryNumeric) != nil
+}
+
+// PickBinaryEx is PickBinary with the BinaryNumeric toggle. When
+// binaryNumeric is true, OIDNumeric returns the binary decoder that
+// parses PG's base-10000 wire format. The default (false) keeps the
+// text decoder — faster on loopback and typical precisions.
+func PickBinaryEx(oid protocol.OID, binaryNumeric bool) Encoder {
 	switch oid {
 	case protocol.OIDBool:
 		return encodeBoolBinary
@@ -44,13 +60,14 @@ func PickBinary(oid protocol.OID) Encoder {
 		return encodeTimeBinary
 	case protocol.OIDTimeTZ:
 		return encodeTimeTZBinary
-	// OIDNumeric: a binary decoder exists in numeric_bin.go but is
-	// intentionally NOT auto-selected. On loopback and typical
-	// numeric(18,4) shapes the text path wins — PG's C-side formatter
-	// beats our Go decoder and the wire bytes are comparable. Wire it
-	// in (EncodeNumericBinaryForTest or via explicit config) when a
-	// workload shows text numeric dominating the profile (wide
-	// precision, high-RTT link, numeric-heavy queries).
+	case protocol.OIDNumeric:
+		// Opt-in via Config.BinaryNumeric. Text is faster on loopback
+		// and typical precisions; binary wins on high-RTT links and
+		// wide precisions. See numeric_bin.go for the wire format.
+		if binaryNumeric {
+			return EncodeNumericBinary
+		}
+		return nil
 	case protocol.OIDInt4Range, protocol.OIDInt8Range, protocol.OIDNumRange,
 		protocol.OIDTsRange, protocol.OIDTsTzRange, protocol.OIDDateRange:
 		// Range types: request binary so struct scan can decode into
@@ -75,10 +92,6 @@ func PickBinary(oid protocol.OID) Encoder {
 	}
 	return nil
 }
-
-// HasBinary reports whether PickBinary returns a non-nil specialised
-// encoder for oid (i.e. asking for binary is worth it).
-func HasBinary(oid protocol.OID) bool { return PickBinary(oid) != nil }
 
 func encodeBoolBinary(dst, raw []byte) []byte {
 	if raw == nil {
