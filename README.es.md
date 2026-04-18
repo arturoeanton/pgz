@@ -22,17 +22,21 @@ Requiere Go 1.25+. Sin cgo.
 
 ### Dependencias
 
-- Paquete core (`github.com/arturoeanton/pgz/pgz`): solo biblioteca
-  estandar.
-- Subpaquete opcional `pgz/otel`: incorpora `go.opentelemetry.io/otel`
-  cuando lo importas. El core no incluye codigo de OTel si no se
-  referencia el subpaquete.
-- `pgx/v5` y `lib/pq` figuran en `go.mod` porque los benchmarks de
-  comparacion en `tests/` los importan como baseline. No los importa
-  ni el core, ni `pgz/stdlib`, ni `pgz/otel`.
+El modulo principal (`github.com/arturoeanton/pgz`) depende solo de
+`go.opentelemetry.io/otel`, que entra por el subpaquete opcional
+`pgz/otel`. Si no importas `pgz/otel`, Go no carga los paquetes de
+OTel: las deps indirectas se resuelven lazy segun el grafo de
+imports.
 
-Con `go mod why github.com/jackc/pgx/v5` se confirma: los unicos
-caminos llevan a `tests/`.
+Los benchmarks de comparacion contra `pgx/v5` y `lib/pq` viven en un
+modulo nested en `tests/` con su propio `go.mod`. No forman parte del
+modulo principal y no aparecen en el `go mod graph` de consumidores.
+
+Se puede verificar con:
+
+```bash
+go list -m all      # grafo del modulo principal: OTel + indirectas
+```
 
 ---
 
@@ -300,8 +304,12 @@ Corre los numeros vos:
 ```bash
 docker compose -f docker/docker-compose.yml up -d
 export PGZ_TEST_DSN="postgres://pgopt:pgopt@127.0.0.1:55432/pgopt?sslmode=disable"
-go test ./tests -run '^$' -bench . -benchmem -benchtime=2s
+(cd tests && go test . -run '^$' -bench . -benchmem -benchtime=2s)
 ```
+
+Los benchmarks de comparacion viven en el modulo nested `tests/`
+(donde entran pgx y lib/pq como baseline). Correlos desde dentro de
+`tests/` o envolvelos en un subshell como arriba.
 
 ---
 

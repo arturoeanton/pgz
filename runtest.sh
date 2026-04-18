@@ -35,10 +35,11 @@ TEST_OUT=$(go test ./... -count=1 -timeout=120s 2>&1) || fail "unit tests" "$TES
 echo "$TEST_OUT"
 pass "unit tests"
 
-# 4. Integration tests (if DSN is set)
+# 4. Integration tests (if DSN is set). Live in the nested `tests/`
+#    module so pgx / lib/pq stay out of the main module graph.
 if [ -n "${PGZ_TEST_DSN:-}" ]; then
     info "integration tests (PGZ_TEST_DSN set)"
-    INT_OUT=$(go test ./tests/ -count=1 -timeout=120s -v 2>&1) || fail "integration tests" "$INT_OUT"
+    INT_OUT=$(cd tests && go test ./... -count=1 -timeout=120s -v 2>&1) || fail "integration tests" "$INT_OUT"
     echo "$INT_OUT"
     pass "integration tests"
 

@@ -16,8 +16,12 @@ Reproducible con:
 ```bash
 docker compose -f docker/docker-compose.yml up -d
 export PGZ_TEST_DSN="postgres://pgopt:pgopt@127.0.0.1:55432/pgopt?sslmode=disable"
-go test ./tests -run '^$' -bench . -benchmem -benchtime=2s
+(cd tests && go test . -run '^$' -bench . -benchmem -benchtime=2s)
 ```
+
+Los benchmarks viven en el modulo nested `tests/` (el que trae pgx y
+lib/pq como baseline de comparacion). Corrélos desde dentro de
+`tests/`, o envolvélos en un subshell como arriba.
 
 ---
 
@@ -274,26 +278,30 @@ Honestidad sobre los huecos restantes.
 docker compose -f docker/docker-compose.yml up -d
 export PGZ_TEST_DSN="postgres://pgopt:pgopt@127.0.0.1:55432/pgopt?sslmode=disable"
 
+# Los benchmarks de comparacion viven en el modulo nested `tests/`.
+cd tests
+
 # Streaming JSON (matriz pgx + matriz pq)
-go test ./tests -run '^$' -bench 'BenchmarkPgx$' -benchmem -benchtime=2s
-go test ./tests -run '^$' -bench 'BenchmarkPq$'  -benchmem -benchtime=2s
+go test . -run '^$' -bench 'BenchmarkPgx$' -benchmem -benchtime=2s
+go test . -run '^$' -bench 'BenchmarkPq$'  -benchmem -benchtime=2s
 
 # Struct scan
-go test ./tests -run '^$' -bench 'BenchmarkScan(Mixed|Narrow|WideJSONB)($|Pq$)' -benchmem -benchtime=2s
+go test . -run '^$' -bench 'BenchmarkScan(Mixed|Narrow|WideJSONB)($|Pq$)' -benchmem -benchtime=2s
 
 # COPY FROM + COPY TO
-go test ./tests -run '^$' -bench 'BenchmarkCopy|BenchmarkCopyTo' -benchmem -benchtime=2s
+go test . -run '^$' -bench 'BenchmarkCopy|BenchmarkCopyTo' -benchmem -benchtime=2s
 
 # Pipeline / SendBatch
-go test ./tests -run '^$' -bench 'BenchmarkPipelineBatch' -benchmem -benchtime=2s
+go test . -run '^$' -bench 'BenchmarkPipelineBatch' -benchmem -benchtime=2s
 
 # Camino de escritura database/sql
-go test ./tests -run '^$' -bench 'BenchmarkStdlib(InsertExec|InsertPrepared|TxInsert)' -benchmem -benchtime=2s
+go test . -run '^$' -bench 'BenchmarkStdlib(InsertExec|InsertPrepared|TxInsert)' -benchmem -benchtime=2s
 
 # Numeric (texto vs binario opt-in)
-go test ./tests -run '^$' -bench 'BenchmarkNumeric' -benchmem -benchtime=2s
+go test . -run '^$' -bench 'BenchmarkNumeric' -benchmem -benchtime=2s
 
-# Regresión del hot-loop (debe mantenerse en 0 allocs/op)
+# La regresion del hot-loop corre en el modulo principal.
+cd ..
 go test ./internal/rows -bench 'RowEncodeMixed' -benchmem -benchtime=3s
 ```
 
