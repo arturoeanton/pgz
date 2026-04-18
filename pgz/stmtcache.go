@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/arturoeanton/pgz/internal/protocol"
 	"github.com/arturoeanton/pgz/internal/rows"
 )
 
@@ -13,10 +14,16 @@ import (
 //   - plan: the compiled row decoder built from the first RowDescription.
 //   - resultFmts: the format codes we asked for in Bind (so we can rebuild
 //     the plan if the description changes — defensive).
+//   - paramOIDs: per-parameter OIDs reported by the server in
+//     ParameterDescription. Used to choose binary encoding per parameter
+//     in Bind. Empty / all-zero when the server could not infer a concrete
+//     type (typical for "SELECT $1" without a cast); those parameters
+//     fall back to text encoding.
 type preparedStmt struct {
 	name       string
 	plan       *rows.Plan
 	resultFmts []int16
+	paramOIDs  []protocol.OID
 }
 
 // stmtCache is a tiny LRU-ish cache keyed by SQL string. We don't bother

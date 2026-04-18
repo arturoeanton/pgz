@@ -447,10 +447,6 @@ func (w *CopyWriter) TimestampTZ(t time.Time) {
 	w.written++
 }
 
-// pgEpoch is 2000-01-01 00:00:00 UTC, the base for PG timestamp wire
-// values (POSTGRES_EPOCH_JDATE in PG's adt/timestamp.c).
-var pgEpoch = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-
 // flush patches the CopyData length prefix in place and writes the
 // entire framed buffer to the socket. The type byte stays at buf[0];
 // the payload length (bytes after the type byte, including the 4-byte

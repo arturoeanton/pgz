@@ -321,15 +321,17 @@ func (c *Client) prepareAndDescribe(sql string) (*preparedStmt, error) {
 
 	var plan *rows.Plan
 	var pgError *pgerr.Error
+	var paramOIDs []protocol.OID
 	for {
 		t, body, err := c.conn.ReadMessage()
 		if err != nil {
 			return nil, err
 		}
 		switch t {
-		case protocol.MsgParseComplete, protocol.MsgParameterDescription,
-			protocol.MsgCloseComplete, protocol.MsgNoData:
+		case protocol.MsgParseComplete, protocol.MsgCloseComplete, protocol.MsgNoData:
 			// ignore: bookkeeping
+		case protocol.MsgParameterDescription:
+			paramOIDs = parseParamOIDs(body)
 		case protocol.MsgRowDescription:
 			plan, err = rows.ParseRowDescription(body)
 			if err != nil {
@@ -364,7 +366,7 @@ func (c *Client) prepareAndDescribe(sql string) (*preparedStmt, error) {
 				}
 			}
 			plan.ApplyFormatsEx(fmts, c.cfg.BinaryNumeric)
-			return &preparedStmt{name: name, plan: plan, resultFmts: fmts}, nil
+			return &preparedStmt{name: name, plan: plan, resultFmts: fmts, paramOIDs: paramOIDs}, nil
 		default:
 			return nil, fmt.Errorf("pgz: unexpected msg %q during describe", t)
 		}
@@ -373,21 +375,10 @@ func (c *Client) prepareAndDescribe(sql string) (*preparedStmt, error) {
 
 func (c *Client) bindExecute(out outWriter, mode Mode, st *preparedStmt, args []any) error {
 	bd := c.conn.Begin(protocol.MsgBind)
-	bd.CString("")        // portal
-	bd.CString(st.name)   // statement
-	bd.Int16(0)           // all params text
-	bd.Int16(int16(len(args)))
-	for _, a := range args {
-		s, isNull, err := encodeArg(a)
-		if err != nil {
-			return err
-		}
-		if isNull {
-			bd.Int32(-1)
-		} else {
-			bd.Int32(int32(len(s)))
-			bd.String(s)
-		}
+	bd.CString("")      // portal
+	bd.CString(st.name) // statement
+	if err := writeBindParams(bd, st.paramOIDs, args); err != nil {
+		return err
 	}
 	// Per-column result format codes. If every column wants binary, send
 	// a single "1" code which the server applies to all columns — saves

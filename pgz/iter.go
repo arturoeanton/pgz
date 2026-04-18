@@ -123,19 +123,8 @@ func (c *Client) startRawExecute(st *preparedStmt, args []any) (*Iterator, error
 	bd := c.conn.Begin(protocol.MsgBind)
 	bd.CString("")
 	bd.CString(st.name)
-	bd.Int16(0)
-	bd.Int16(int16(len(args)))
-	for _, a := range args {
-		s, isNull, err := encodeArg(a)
-		if err != nil {
-			return nil, err
-		}
-		if isNull {
-			bd.Int32(-1)
-		} else {
-			bd.Int32(int32(len(s)))
-			bd.String(s)
-		}
+	if err := writeBindParams(bd, st.paramOIDs, args); err != nil {
+		return nil, err
 	}
 	if allBinary(st.resultFmts) {
 		bd.Int16(1)

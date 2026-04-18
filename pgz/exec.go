@@ -129,14 +129,16 @@ func (c *Client) execPrepare(sql string) (*preparedStmt, error) {
 	var plan *rows.Plan
 	var noData bool
 	var pgError *pgerr.Error
+	var paramOIDs []protocol.OID
 	for {
 		t, body, err := c.conn.ReadMessage()
 		if err != nil {
 			return nil, err
 		}
 		switch t {
-		case protocol.MsgParseComplete, protocol.MsgParameterDescription,
-			protocol.MsgCloseComplete:
+		case protocol.MsgParseComplete, protocol.MsgCloseComplete:
+		case protocol.MsgParameterDescription:
+			paramOIDs = parseParamOIDs(body)
 		case protocol.MsgNoData:
 			noData = true
 		case protocol.MsgRowDescription:
@@ -158,7 +160,7 @@ func (c *Client) execPrepare(sql string) (*preparedStmt, error) {
 			}
 			if noData {
 				// No result columns — pure DML. plan stays nil.
-				return &preparedStmt{name: name}, nil
+				return &preparedStmt{name: name, paramOIDs: paramOIDs}, nil
 			}
 			if plan == nil {
 				return nil, fmt.Errorf("pgz: exec prepare returned neither NoData nor RowDescription")
@@ -175,7 +177,7 @@ func (c *Client) execPrepare(sql string) (*preparedStmt, error) {
 				}
 			}
 			plan.ApplyFormatsEx(fmts, c.cfg.BinaryNumeric)
-			return &preparedStmt{name: name, plan: plan, resultFmts: fmts}, nil
+			return &preparedStmt{name: name, plan: plan, resultFmts: fmts, paramOIDs: paramOIDs}, nil
 		default:
 			return nil, fmt.Errorf("pgz: unexpected msg %q during exec prepare", t)
 		}
@@ -188,19 +190,8 @@ func (c *Client) execBind(st *preparedStmt, args []any) (ExecResult, error) {
 	bd := c.conn.Begin(protocol.MsgBind)
 	bd.CString("")
 	bd.CString(st.name)
-	bd.Int16(0)
-	bd.Int16(int16(len(args)))
-	for _, a := range args {
-		s, isNull, err := encodeArg(a)
-		if err != nil {
-			return ExecResult{}, err
-		}
-		if isNull {
-			bd.Int32(-1)
-		} else {
-			bd.Int32(int32(len(s)))
-			bd.String(s)
-		}
+	if err := writeBindParams(bd, st.paramOIDs, args); err != nil {
+		return ExecResult{}, err
 	}
 	bd.Int16(0) // no result format codes (no result columns)
 	bd.Finish()
