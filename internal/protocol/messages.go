@@ -23,6 +23,9 @@ const (
 	MsgReadyForQuery        byte = 'Z'
 	MsgRowDescription       byte = 'T'
 	MsgNegotiateProtocol    byte = 'v'
+	MsgCopyInResponse       byte = 'G'
+	MsgCopyOutResponse      byte = 'H'
+	MsgCopyBothResponse     byte = 'W'
 )
 
 // Frontend message types (client -> server).
@@ -37,6 +40,9 @@ const (
 	MsgSync     byte = 'S'
 	MsgTerm     byte = 'X'
 	MsgPassword byte = 'p' // also SASL{Initial,}Response
+	MsgCopyData byte = 'd' // bidirectional
+	MsgCopyDone byte = 'c' // bidirectional
+	MsgCopyFail byte = 'f' // frontend only
 )
 
 // Authentication request subtypes (the int32 immediately following
